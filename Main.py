@@ -18,9 +18,11 @@ import re
 from aiohttp import ClientSession
 from discord import app_commands, File
 import json
+from keep_alive import keep_alive
+
 
 load_dotenv()
-
+keep_alive()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -34,8 +36,95 @@ GUILD_ID = 1398619451875786932, 1294593959313539135
 GENIUS_API_TOKEN = "LDgYY-fH14O-Up1uPggFz5MGBQYbFGB4_hnzG5YyDQxeX1rPxhFxN8Kq40p0u_Vi"
 MOD_LOG_CHANNEL_ID = 1406252218524631130
 PRESENCE_FILE = "bot_presence.json"
+AFK_STORAGE_FILE = "afk_statuses.json"
 
 bot = commands.Bot(command_prefix=',', intents=intents)
+
+
+#Bot events and commands <------------------------------------------------
+
+@bot.command(name="ping", help="Check the bot's latency")
+async def ping(ctx):
+    await ctx.send(f'Pong! {round(bot.latency * 1000)}ms')
+
+
+@bot.event
+async def on_ready():
+    data = load_presence()
+    await bot.change_presence(
+        status=discord.Status[data["status"]],
+        activity=create_activity(data["activity"], data["activity_type"])
+    )
+    await bot.tree.sync()
+    print(f"{bot.user} is online!")
+
+    load_afk_statuses()
+
+@bot.event
+async def on_message(message):
+    # Do not reply to the bot's own messages
+    if message.author == bot.user or message.author.bot:
+        return
+
+    # === Profanity check logic ===
+    for term in profanity:
+        if term.lower() in message.content.lower():
+            warning_count = increase_and_get_warning_count(message.author.id, message.guild.id)
+            if warning_count >= 3:
+                await message.channel.send(f'{message.author.mention}, you have been banned for repeated use of prohibited language.')
+                await message.guild.ban(message.author, reason="Repeated use of prohibited language.")
+            else:
+                await message.channel.send(f'{message.author.mention}, please refrain from using prohibited language. This is your warning {warning_count}/3.')
+            await message.delete()
+            return  # Make sure to return so logic below doesn't run for deleted messages
+
+    # === Uwufy webhook logic ===
+    if (message.guild and (message.guild.id, message.author.id) in UWUFIED_USERS_WEBHOOK):
+        try:
+            await message.delete()
+        except discord.errors.Forbidden:
+            pass # No perms to delete
+        uwutext = uwufy_text(message.content)
+        webhook = await get_or_create_webhook(message.channel, message.author)
+        try:
+            await webhook.send(
+                uwutext,
+                username=message.author.display_name,
+                avatar_url=message.author.display_avatar.url,
+                allowed_mentions=discord.AllowedMentions.none(),
+                wait=True,
+            )
+        except Exception as e:
+            await message.channel.send(f"Uwufy error: {e}")
+        return  # Don't process commands from uwufied users' messages
+
+    # === AFK logic ===
+    afk_notified = set()
+    mentioned_ids = {str(u.id) for u in message.mentions}
+    if message.reference:
+        try:
+            ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            mentioned_ids.add(str(ref_msg.author.id))
+        except Exception:
+            pass
+
+    for uid in mentioned_ids:
+        if uid in afk_users and uid not in afk_notified:
+            info = afk_users[uid]
+            afk_time = format_afk_time(info["since"])
+            reason = info["reason"]
+            await message.channel.send(f"🔔 <@{uid}> is AFK ({afk_time})\nReason: **{reason}**")
+            afk_notified.add(uid)
+
+    user_id = str(message.author.id)
+    if user_id in afk_users:
+        del afk_users[user_id]
+        save_afk_statuses()
+        await message.channel.send(f"🟢 {message.author.mention} is no longer AFK!")
+
+
+    await bot.process_commands(message)
+
 
 # Create the structure for queueing songs - Dictionary of queues
 SONG_QUEUES = {}
@@ -57,26 +146,6 @@ def _extract(query, ydl_opts):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 profanity = ["nigga, ayuu, PornName"]
-
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
-
-    for term in profanity:
-        if term.lower() in message.content.lower():
-            warning_count = increase_and_get_warning_count(message.author.id, message.guild.id)
-            
-            if warning_count >= 3:
-                await message.channel.send(f'{message.author.mention}, you have been banned for repeated use of prohibited language.')
-                await message.guild.ban(message.author, reason="Repeated use of prohibited language.")
-            else:
-                await message.channel.send(f'{message.author.mention}, please refrain from using prohibited language. This is your warning {warning_count}/3.')
-            
-                await message.delete()
-            break
-    
-    await bot.process_commands(message)
 
 @bot.command(name='addprofanity', help='Add a word to the profanity list')
 @commands.has_permissions(administrator=True)
@@ -176,25 +245,6 @@ async def resetwarnings(ctx, member: discord.Member):
     connection.close()
 
     await ctx.send(f'{member.mention}\'s warnings have been reset.')
-
-
-#Bot events and commands <------------------------------------------------
-
-@bot.command(name="ping", help="Check the bot's latency")
-async def ping(ctx):
-    await ctx.send(f'Pong! {round(bot.latency * 1000)}ms')
-
-
-@bot.event
-async def on_ready():
-    data = load_presence()
-    await bot.change_presence(
-        status=discord.Status[data["status"]],
-        activity=create_activity(data["activity"], data["activity_type"])
-    )
-    await bot.tree.sync()
-    print(f"{bot.user} is online!")
-
 
 
 #music commands <------------------------------------------------
@@ -671,35 +721,6 @@ async def get_or_create_webhook(channel, user):
             return wh
     # Create new webhook
     return await channel.create_webhook(name=f"Uwufy-{user.id}")
-
-# ------ on_message event for uwufy with webhook ------
-@bot.event
-async def on_message(message):
-    if message.author == bot.user or message.author.bot:
-        return
-
-    # Self-uwufy logic (skip commands here if you want)
-    if (message.guild and (message.guild.id, message.author.id) in UWUFIED_USERS_WEBHOOK):
-        try:
-            await message.delete()
-        except discord.errors.Forbidden:
-            pass  # No perms to delete
-
-        uwutext = uwufy_text(message.content)
-        webhook = await get_or_create_webhook(message.channel, message.author)
-        try:
-            await webhook.send(
-                uwutext,
-                username=message.author.display_name,
-                avatar_url=message.author.display_avatar.url,
-                allowed_mentions=discord.AllowedMentions.none(),  # Don't ping
-                wait=True,
-            )
-        except Exception as e:
-            await message.channel.send(f"Uwufy error: {e}")
-        return  # Don't process commands from uwufied users' messages
-
-    await bot.process_commands(message)
 
 # ------ Uwufy command (with error handling) ------
 @bot.command(name="uwufy", help="Uwufy a user using webhooks! Their messages will be uwufied and re-sent in their name.")
@@ -1325,6 +1346,81 @@ async def on_command_error(ctx, error):
         await ctx.send(f'An error occurred: Command "{attempted_name}" is not found')
     else:
         raise error
+    
+#Bot Uptime command <------------------------------------------------
+
+bot_start_time = time.time()
+
+@bot.command(name="uptime", help="Shows how long the bot has been online.")
+async def uptime(ctx):
+    current_time = time.time()
+    elapsed = int(current_time - bot_start_time)
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    await ctx.send(f"🕒 Bot uptime: {hours} hours, {minutes} minutes, {seconds} seconds.")
+
+@uptime.error
+async def uptime_error(ctx, error):
+    await ctx.send(f"An error occurred: {error}")
+
+
+#Afk command <------------------------------------------------
+
+afk_users = {}  # {user_id: {"since": ISO8601 str, "reason": str, "forced_by": None/int}}
+
+def load_afk_statuses():
+    global afk_users
+    if os.path.exists(AFK_STORAGE_FILE):
+        with open(AFK_STORAGE_FILE, "r") as f:
+            afk_users = json.load(f)
+        # Convert string time to datetime for runtime logic
+        for uid in afk_users:
+            afk_users[uid]["since"] = datetime.fromisoformat(afk_users[uid]["since"])
+    else:
+        afk_users = {}
+
+def save_afk_statuses():
+    # Save time as ISO8601 string for portability
+    serializable = {uid: {"since": afk_users[uid]["since"].isoformat(), "reason": afk_users[uid]["reason"], "forced_by": afk_users[uid].get("forced_by", None)} for uid in afk_users}
+    with open(AFK_STORAGE_FILE, "w") as f:
+        json.dump(serializable, f)
+
+load_afk_statuses()
+
+def format_afk_time(dt):
+    delta = datetime.utcnow() - dt
+    hours, remainder = divmod(int(delta.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    result = []
+    if hours:
+        result.append(f"{hours}h")
+    if minutes:
+        result.append(f"{minutes}m")
+    result.append(f"{seconds}s")
+    return " ".join(result)
+
+@bot.command(name="afk", help="Set yourself as AFK with an optional reason.")
+async def afk_command(ctx, *, reason:str=None):
+    user_id = str(ctx.author.id)
+    afk_users[user_id] = {
+        "since": datetime.utcnow(),
+        "reason": reason or "No reason provided",
+        "forced_by": None
+    }
+    save_afk_statuses()
+    await ctx.send(f"🟡 {ctx.author.mention} is now AFK: **{afk_users[user_id]['reason']}**")
+
+@bot.command(name="fafk", help="Force another user as AFK (admin only).")
+@commands.has_permissions(administrator=True)
+async def force_afk(ctx, member:discord.Member, *, reason:str=None):
+    user_id = str(member.id)
+    afk_users[user_id] = {
+        "since": datetime.utcnow(),
+        "reason": reason or "No reason provided",
+        "forced_by": ctx.author.id
+    }
+    save_afk_statuses()
+    await ctx.send(f"⚠️ {member.mention} was forcibly AFKed: **{afk_users[user_id]['reason']}**")
 
 #Bot run <------------------------------------------------
 
