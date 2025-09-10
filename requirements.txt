@@ -11,6 +11,7 @@ discord==2.2.3
 discord.py==2.6.3
 distlib==0.4.0
 filelock==3.19.1
+flask==3.0.3
 frozenlist==1.4.1
 idna==3.6
 inquirerpy==0.3.4
@@ -40,6 +41,7 @@ wcwidth==0.2.13
 yarl==1.9.4
 yt-dlp==2025.9.5
 python-dotenv==1.1.1
+
 
 
 
