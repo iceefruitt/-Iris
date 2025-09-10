@@ -18,11 +18,9 @@ import re
 from aiohttp import ClientSession
 from discord import app_commands, File
 import json
-from keep_alive import keep_alive
 
 
 load_dotenv()
-keep_alive()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -1425,3 +1423,4 @@ async def force_afk(ctx, member:discord.Member, *, reason:str=None):
 #Bot run <------------------------------------------------
 
 bot.run(TOKEN)
+
